@@ -1022,4 +1022,1259 @@ Banner молчит когда up-to-date и rate-limits "check failed" диаг
 
 ---
 
-> **Конец первой половины перевода.** Дальше — фичи v1.27+ (исторический changelog-style каталог: Fast Mode, Cross-AI Peer Review, Backlog Parking Lot, Security Hardening, Forensics, Workstreams, Discuss Modes, AI Integration Phase, Spike/Sketch, Knowledge Graph, Namespace Meta-Skills, Dynamic Routing и т.д.). Будут переведены в следующем коммите. Английский оригинал: [FEATURES.md](FEATURES.md).
+## v1.27 фичи
+
+### 41. Fast Mode
+
+**Команда:** `/gsd-fast [описание задачи]`
+
+**Назначение:** Исполнить тривиальные задачи inline без спавна sub-агентов или генерации PLAN.md файлов. Для задач слишком маленьких чтобы оправдать planning-overhead: фиксы опечаток, изменения конфига, мелкие рефакторинги, забытые коммиты, простые добавления.
+
+**Требования:**
+- REQ-FAST-01: Система ДОЛЖНА исполнять задачу напрямую в текущем контексте без sub-агентов
+- REQ-FAST-02: Система ДОЛЖНА производить атомарный git-коммит для изменения
+- REQ-FAST-03: Система ДОЛЖНА трекать задачу в `.planning/quick/` для state-consistency
+- REQ-FAST-04: Система НЕ ДОЛЖНА использоваться для задач, требующих research, многошагового планирования или верификации
+
+**Когда использовать vs `/gsd-quick`:**
+- `/gsd-fast` — Однопредложение, исполнимое за <2 минуты (опечатка, config-изменение, малое добавление)
+- `/gsd-quick` — Что-то нуждающееся в research, многошаговом планировании или верификации
+
+---
+
+### 42. Cross-AI Peer Review
+
+**Команда:** `/gsd-review --phase N [--gemini] [--claude] [--codex] [--coderabbit] [--opencode] [--qwen] [--cursor] [--ollama] [--lm-studio] [--llama-cpp] [--all]`
+
+**Назначение:** Вызывать внешние AI CLI (Gemini, Claude, Codex, CodeRabbit, OpenCode, Qwen Code, Cursor) для независимого ревью планов фазы. Производит структурированный REVIEWS.md с per-reviewer фидбеком.
+
+**Требования:**
+- REQ-REVIEW-01: Система ДОЛЖНА детектить доступные AI CLI в системе
+- REQ-REVIEW-02: Система ДОЛЖНА строить структурированный review-промпт из планов фазы
+- REQ-REVIEW-03: Система ДОЛЖНА вызывать каждый выбранный CLI независимо
+- REQ-REVIEW-04: Система ДОЛЖНА собирать ответы и производить `REVIEWS.md`
+- REQ-REVIEW-05: Ревью ДОЛЖНЫ быть потребляемы `/gsd-plan-phase --reviews`
+- REQ-REVIEW-06: Система ДОЛЖНА поддерживать project-level no-flag дефолты через `review.default_reviewers`
+- REQ-REVIEW-07: Приоритет ревьюеров ДОЛЖЕН быть: явные флаги > `--all` > `review.default_reviewers` > все детектированные
+
+**Производит:** `{phase}-REVIEWS.md` — Per-reviewer структурированный фидбек
+
+**Заметка по конфигурации:**
+- Установи `review.default_reviewers` в `.planning/config.json` (или через `gsd config-set`) чтобы контролировать no-flag `/gsd-review` fan-out
+- Используй `--all` для полного pre-merge sweep'а без изменения project-дефолтов
+
+---
+
+### 43. Backlog Parking Lot
+
+**Команды:** `/gsd-capture --backlog <description>`, `/gsd-review-backlog`, `/gsd-capture --seed <idea>`
+
+**Назначение:** Захват идей, не готовых к активному планированию. Backlog-айтемы используют 999.x нумерацию чтобы оставаться вне активной phase-последовательности. Seeds — forward-looking идеи с триггер-условиями, всплывающие автоматически на правильном майлстоуне.
+
+**Требования:**
+- REQ-BACKLOG-01: Backlog-айтемы ДОЛЖНЫ использовать 999.x нумерацию
+- REQ-BACKLOG-02: Phase-директории ДОЛЖНЫ создаваться сразу, чтобы `/gsd-discuss-phase` и `/gsd-plan-phase` работали на них
+- REQ-BACKLOG-03: `/gsd-review-backlog` ДОЛЖЕН поддерживать promote, keep и remove действия per айтем
+- REQ-BACKLOG-04: Promote'ehные айтемы ДОЛЖНЫ перенумероваться в активную milestone-последовательность
+- REQ-SEED-01: Seeds ДОЛЖНЫ захватывать полное WHY и WHEN-всплыть условия
+- REQ-SEED-02: `/gsd-new-milestone` ДОЛЖЕН сканить seeds и презентовать подходящие
+
+**Производит:**
+| Артефакт | Описание |
+|----------|----------|
+| `.planning/phases/999.x-slug/` | Директория backlog-айтема |
+| `.planning/seeds/SEED-NNN-slug.md` | Seed с триггер-условиями |
+
+---
+
+### 44. Persistent Context Threads
+
+**Команда:** `/gsd-thread [name | description]`
+
+**Назначение:** Лёгкие cross-session хранилища знаний для работы, растягивающейся на несколько сессий, но не принадлежащей конкретной фазе. Легче чем `/gsd-pause-work` — нет phase-state, нет plan-context.
+
+**Требования:**
+- REQ-THREAD-01: Система ДОЛЖНА поддерживать create, list и resume режимы
+- REQ-THREAD-02: Треды ДОЛЖНЫ храниться в `.planning/threads/` как markdown-файлы
+- REQ-THREAD-03: Файлы тредов ДОЛЖНЫ включать секции Goal, Context, References, Next Steps
+- REQ-THREAD-04: Resume треда ДОЛЖЕН загружать его полный контекст в текущую сессию
+- REQ-THREAD-05: Треды ДОЛЖНЫ быть promotable в фазы или backlog-айтемы
+
+**Производит:** `.planning/threads/{slug}.md` — Persistent контекстный тред
+
+---
+
+### 45. PR Branch Filtering
+
+**Команда:** `/gsd-pr-branch [target branch]`
+
+**Назначение:** Создать чистую ветку, подходящую для pull request'ов, фильтруя `.planning/` коммиты. Ревьюеры видят только изменения кода, не планировочные артефакты GSD.
+
+**Требования:**
+- REQ-PRBRANCH-01: Система ДОЛЖНА идентифицировать коммиты, модифицирующие только файлы `.planning/`
+- REQ-PRBRANCH-02: Система ДОЛЖНА создавать новую ветку с отфильтрованными planning-коммитами
+- REQ-PRBRANCH-03: Изменения кода ДОЛЖНЫ сохраняться точно как закоммичены
+
+---
+
+### 46. Security Hardening
+
+**Назначение:** Defense-in-depth безопасность для планировочных артефактов GSD. Поскольку GSD генерирует markdown-файлы, становящиеся LLM system prompt'ами, user-controlled текст, попадающий в эти файлы — потенциальный вектор indirect prompt injection.
+
+**Компоненты:**
+
+**1. Централизованный security-модуль** (`security.cjs`)
+- Защита от path traversal — валидирует что пути файлов резолвятся внутрь project-директории
+- Детекция prompt injection — сканит известные injection-паттерны в user-supplied тексте
+- Безопасный JSON-парсинг — ловит malformed-ввод до порчи state
+- Валидация имён полей — предотвращает injection через имена config-полей
+- Валидация shell-аргументов — санитизирует пользовательский текст до shell-интерполяции
+
+**2. Prompt Injection Guard Hook** (`gsd-prompt-guard.js`)
+PreToolUse хук, сканирующий Write/Edit-вызовы, таргетящие `.planning/`, на injection-паттерны. Advisory-only — логирует детекцию для осведомлённости без блокирования legitimate-операций.
+
+**3. Workflow Guard Hook** (`gsd-workflow-guard.js`)
+PreToolUse хук, детектящий когда Claude пытается править файлы вне GSD-воркфлоу. Советует использовать `/gsd-quick` или `/gsd-fast` вместо прямых правок. Конфигурируется через `hooks.workflow_guard` (дефолт: false).
+
+**4. CI-ready Injection Scanner** (`prompt-injection-scan.test.cjs`)
+Test-suite, сканирующий все agent-, workflow- и command-файлы на встроенные injection-векторы.
+
+**Требования:**
+- REQ-SEC-01: Все пользовательские пути ДОЛЖНЫ валидироваться против project-директории
+- REQ-SEC-02: Паттерны prompt injection ДОЛЖНЫ детектиться до попадания текста в планировочные артефакты
+- REQ-SEC-03: Security-хуки ДОЛЖНЫ быть advisory-only (никогда не блокировать legitimate-операции)
+- REQ-SEC-04: JSON-парсинг user-ввода ДОЛЖЕН ловить malformed-данные gracefully
+- REQ-SEC-05: macOS-резолв `/var` → `/private/var` symlink ДОЛЖЕН обрабатываться в path-валидации
+
+---
+
+### 47. Multi-Repo Workspace Support
+
+**Назначение:** Авто-детект и резолв project-root для монорепо и multi-repo setup'ов. Поддерживает workspace'ы, где `.planning/` может нуждаться в резолве через границы репозиториев.
+
+**Требования:**
+- REQ-MULTIREPO-01: Система ДОЛЖНА авто-детектить multi-repo workspace-конфигурацию
+- REQ-MULTIREPO-02: Система ДОЛЖНА резолвить project-root через границы репозиториев
+- REQ-MULTIREPO-03: Executor ДОЛЖЕН записывать per-repo commit-хеши в multi-repo режиме
+
+---
+
+### 48. Discussion Audit Trail
+
+**Назначение:** Авто-генерация `DISCUSSION-LOG.md` во время `/gsd-discuss-phase` для полного audit trail решений, принятых во время обсуждения.
+
+**Требования:**
+- REQ-DISCLOG-01: Система ДОЛЖНА авто-генерировать DISCUSSION-LOG.md во время discuss-phase
+- REQ-DISCLOG-02: Лог ДОЛЖЕН фиксировать заданные вопросы, презентованные опции и принятые решения
+- REQ-DISCLOG-03: ID решений ДОЛЖНЫ обеспечивать traceability от discuss-phase к plan-phase
+
+---
+
+## v1.28 фичи
+
+### 49. Forensics
+
+**Команда:** `/gsd-forensics [description]`
+
+**Назначение:** Post-mortem расследование упавших или застрявших GSD-воркфлоу.
+
+**Требования:**
+- REQ-FORENSICS-01: Система ДОЛЖНА анализировать git-историю на аномалии (застрявшие циклы, длинные пробелы, повторяющиеся коммиты)
+- REQ-FORENSICS-02: Система ДОЛЖНА проверять целостность артефактов (у завершённых фаз есть ожидаемые файлы)
+- REQ-FORENSICS-03: Система ДОЛЖНА генерировать markdown-отчёт, сохраняемый в `.planning/forensics/`
+- REQ-FORENSICS-04: Система ДОЛЖНА предлагать создание GitHub issue с находками
+- REQ-FORENSICS-05: Система НЕ ДОЛЖНА модифицировать project-файлы (read-only расследование)
+
+**Производит:** `.planning/forensics/report-{timestamp}.md` — Post-mortem отчёт
+
+---
+
+### 50. Milestone Summary
+
+**Команда:** `/gsd-milestone-summary [version]`
+
+**Назначение:** Сгенерировать comprehensive project summary из milestone-артефактов для онбординга команды.
+
+**Требования:**
+- REQ-SUMMARY-01: Система ДОЛЖНА аггрегировать phase-планы, summary'и и verification-результаты
+- REQ-SUMMARY-02: Система ДОЛЖНА работать и для текущих, и для архивных майлстоунов
+- REQ-SUMMARY-03: Система ДОЛЖНА производить один navigable документ
+
+**Производит:** `MILESTONE-SUMMARY.md` — Comprehensive navigable summary milestone-артефактов
+
+---
+
+### 51. Workstream Namespacing
+
+**Команда:** `/gsd-workstreams`
+
+**Назначение:** Параллельные workstream'ы для конкурентной работы над разными областями майлстоуна.
+
+**Требования:**
+- REQ-WS-01: Система ДОЛЖНА изолировать workstream-state в отдельных директориях `.planning/workstreams/{name}/`
+- REQ-WS-02: Система ДОЛЖНА валидировать имена workstream'ов (только alphanumeric + дефисы, без path traversal)
+- REQ-WS-03: Система ДОЛЖНА поддерживать подкоманды list, create, switch, status, progress, complete, resume
+
+---
+
+### 52. Manager Dashboard
+
+**Команда:** `/gsd-manager`
+
+**Назначение:** Интерактивный командный центр для управления несколькими фазами из одного терминала.
+
+**Требования:**
+- REQ-MGR-01: Система ДОЛЖНА показывать обзор всех фаз со статусом
+- REQ-MGR-02: Система ДОЛЖНА фильтровать к scope'у текущего майлстоуна
+- REQ-MGR-03: Система ДОЛЖНА показывать зависимости фаз и конфликты
+
+---
+
+### 53. Assumptions Discussion Mode
+
+**Команда:** `/gsd-discuss-phase` с `workflow.discuss_mode: 'assumptions'`
+
+**Назначение:** Заменить интервью-стиль вопросов на codebase-first анализ предположений.
+
+**Требования:**
+- REQ-ASSUME-01: Система ДОЛЖНА анализировать кодовую базу для генерации структурированных предположений до вопросов
+- REQ-ASSUME-02: Система ДОЛЖНА классифицировать предположения по confidence-уровню (Confident/Likely/Unclear)
+- REQ-ASSUME-03: Система ДОЛЖНА производить CONTEXT.md идентичного формата как дефолтный discuss-режим
+- REQ-ASSUME-04: Система ДОЛЖНА поддерживать confidence-based skip gate (все HIGH = нет вопросов)
+
+---
+
+### 54. UI Phase Auto-Detection
+
+**Часть:** `/gsd-new-project` и `/gsd-progress`
+
+**Назначение:** Автоматически детектить UI-heavy проекты и всплывать рекомендацию `/gsd-ui-phase`.
+
+**Требования:**
+- REQ-UI-DETECT-01: Система ДОЛЖНА детектить UI-сигналы в описании проекта (ключевые слова, framework-ссылки)
+- REQ-UI-DETECT-02: Система ДОЛЖНА аннотировать фазы ROADMAP.md `ui_hint` когда применимо
+- REQ-UI-DETECT-03: Система ДОЛЖНА предлагать `/gsd-ui-phase` в следующих шагах для UI-heavy фаз
+- REQ-UI-DETECT-04: Система НЕ ДОЛЖНА делать `/gsd-ui-phase` обязательным
+
+---
+
+### 55. Multi-Runtime Installer Selection
+
+**Часть:** `npx get-shit-done-cc`
+
+**Назначение:** Выбирать несколько рантаймов в одной интерактивной install-сессии.
+
+**Требования:**
+- REQ-MULTI-RT-01: Интерактивный промпт ДОЛЖЕН поддерживать multi-select (например, Claude Code + Gemini)
+- REQ-MULTI-RT-02: CLI-флаги ДОЛЖНЫ продолжать работать для неинтерактивных установок
+
+---
+
+## v1.29 фичи
+
+### 56. Windsurf Runtime Support
+
+**Назначение:** Добавить Windsurf как поддерживаемый AI CLI рантайм для установки и исполнения GSD.
+
+**Требования:**
+- REQ-WINDSURF-01: Установщик ДОЛЖЕН детектить Windsurf-рантайм и предлагать его как цель
+- REQ-WINDSURF-02: GSD-команды ДОЛЖНЫ функционировать корректно внутри Windsurf-сессий
+
+---
+
+### 57. Internationalized Documentation
+
+**Назначение:** Предоставить документацию GSD на португальском, корейском и японском.
+
+**Требования:**
+- REQ-I18N-01: Документация ДОЛЖНА быть доступна на португальском (pt), корейском (ko) и японском (ja)
+- REQ-I18N-02: Переводы ДОЛЖНЫ оставаться синхронизированными с английскими source-документами
+
+> *Этот форк добавляет русский (ru-RU) как шестой язык.*
+
+---
+
+## v1.30 фичи
+
+### 58. GSD SDK
+
+**Назначение:** Headless TypeScript SDK для программного запуска GSD-воркфлоу без CLI-сессии.
+
+**Требования:**
+- REQ-SDK-01: SDK ДОЛЖЕН выставлять GSD workflow-операции как TypeScript-функции
+- REQ-SDK-02: SDK ДОЛЖЕН поддерживать headless-исполнение без интерактивных промптов
+- REQ-SDK-03: SDK ДОЛЖЕН производить те же артефакты что CLI-driven workflow'ы
+
+---
+
+## v1.31 фичи
+
+### 59. Schema Drift Detection
+
+**Команда:** Автоматически во время `/gsd-execute-phase`
+
+**Назначение:** Детектить когда ORM schema-файлы модифицированы без соответствующих migration или push команд, предотвращая false-positive верификацию.
+
+**Требования:**
+- REQ-SCHEMA-01: Система ДОЛЖНА детектить модификации ORM schema-файлов (Prisma, Drizzle, Payload, Sanity, Mongoose)
+- REQ-SCHEMA-02: Система ДОЛЖНА верифицировать что соответствующие migration/push команды существуют когда schema-изменения детектированы
+- REQ-SCHEMA-03: Система ДОЛЖНА реализовывать two-layer defense: plan-time инъекция и execute-time gate
+- REQ-SCHEMA-04: Система ДОЛЖНА поддерживать env-переменную `GSD_SKIP_SCHEMA_CHECK` для override детекции
+- REQ-SCHEMA-05: Система ДОЛЖНА предотвращать false-positive верификацию когда схема модифицирована без миграции
+
+**Конфигурация:** Env-переменная `GSD_SKIP_SCHEMA_CHECK` для bypass'а детекции.
+
+---
+
+### 60. Security Enforcement
+
+**Команда:** `/gsd-secure-phase <N>`
+
+**Назначение:** Threat-model-anchored security-верификация для реализаций фаз.
+
+**Требования:**
+- REQ-SEC-01: Система ДОЛЖНА выполнять threat-model-anchored верификацию (не blind-сканирование)
+- REQ-SEC-02: Система ДОЛЖНА поддерживать конфигурируемые OWASP ASVS verification-уровни (1-3)
+- REQ-SEC-03: Система ДОЛЖНА блокировать phase-advancement на основе конфигурируемого severity-порога
+- REQ-SEC-04: Система ДОЛЖНА спавнить агент `gsd-security-auditor` для анализа
+
+**Производит:** Security audit-отчёт — Threat-model-anchored находки с severity-классификацией
+
+**Конфиг:**
+| Настройка | Тип | Дефолт | Описание |
+|-----------|-----|--------|----------|
+| `security_enforcement` | boolean | `true` | Включить threat-model security-верификацию |
+| `security_asvs_level` | number (1-3) | `1` | OWASP ASVS verification-уровень |
+| `security_block_on` | string | `"high"` | Минимальная severity для блокировки phase-advancement |
+
+---
+
+### 61. Documentation Generation
+
+**Команда:** `/gsd-docs-update`
+
+**Назначение:** Генерировать и верифицировать project-документацию с accuracy-проверками.
+
+**Требования:**
+- REQ-DOCS-01: Система ДОЛЖНА спавнить агента `gsd-doc-writer` для генерации документации
+- REQ-DOCS-02: Система ДОЛЖНА спавнить агента `gsd-doc-verifier` для проверки точности
+- REQ-DOCS-03: Система ДОЛЖНА верифицировать сгенерированную документацию против фактической реализации
+
+---
+
+### 62. Discuss Chain Mode
+
+**Флаг:** `/gsd-discuss-phase <N> --chain`
+
+**Назначение:** Авто-цепочка discuss, plan и execute фаз в одном flow чтобы сократить ручную команд-секвенциализацию.
+
+**Требования:**
+- REQ-CHAIN-01: Система ДОЛЖНА авто-цеплять discuss → plan → execute когда `--chain` флаг предоставлен
+- REQ-CHAIN-02: Система ДОЛЖНА уважать все gate-настройки между chained-фазами
+- REQ-CHAIN-03: Система ДОЛЖНА останавливать цепочку если любая фаза падает
+
+---
+
+### 63. Single-Phase Autonomous
+
+**Флаг:** `/gsd-autonomous --only N`
+
+**Назначение:** Исполнить только одну фазу автономно вместо всех оставшихся.
+
+**Требования:**
+- REQ-ONLY-01: Система ДОЛЖНА исполнять только указанный номер фазы когда `--only N` предоставлен
+- REQ-ONLY-02: Система ДОЛЖНА следовать тому же discuss → plan → execute flow что и полный autonomous-режим
+- REQ-ONLY-03: Система ДОЛЖНА останавливаться после завершения указанной фазы
+
+---
+
+### 64. Scope Reduction Detection
+
+**Часть:** `/gsd-plan-phase`
+
+**Назначение:** Предотвратить молчаливое отбрасывание требований во время генерации плана с three-layer defense.
+
+**Требования:**
+- REQ-SCOPE-01: Система ДОЛЖНА запрещать планировщикам редукцию scope без явного обоснования
+- REQ-SCOPE-02: Система ДОЛЖНА иметь plan-checker верифицирующий покрытие requirement-измерений
+- REQ-SCOPE-03: Система ДОЛЖНА иметь оркестратор, восстанавливающий дропнутые требования и re-инжектящий их
+- REQ-SCOPE-04: Система ДОЛЖНА реализовывать three-layer defense: planner prohibition, checker dimension, orchestrator recovery
+
+---
+
+### 65. Claim Provenance Tagging
+
+**Часть:** `/gsd-plan-phase --research-phase <N>`
+
+**Назначение:** Гарантировать что research-утверждения тегаются source-доказательствами и предположения логируются отдельно.
+
+**Требования:**
+- REQ-PROVENANCE-01: Researcher ДОЛЖЕН помечать утверждения source-evidence ссылками
+- REQ-PROVENANCE-02: Предположения ДОЛЖНЫ логироваться отдельно от sourced-утверждений
+- REQ-PROVENANCE-03: Система ДОЛЖНА различать между evidenced-фактами и inferred-предположениями
+
+---
+
+### 66. Worktree Toggle
+
+**Конфиг:** `workflow.use_worktrees: false`
+
+**Назначение:** Отключить git worktree-изоляцию для пользователей, предпочитающих последовательное исполнение.
+
+**Требования:**
+- REQ-WORKTREE-01: Система ДОЛЖНА уважать настройку `workflow.use_worktrees` при выборе isolation-стратегии
+- REQ-WORKTREE-02: Система ДОЛЖНА по дефолту быть `true` (worktree'ы включены) для backward compatibility
+- REQ-WORKTREE-03: Система ДОЛЖНА fallback'иться на sequential-исполнение когда worktree'ы отключены
+
+---
+
+### 67. Project Code Prefixing
+
+**Конфиг:** `project_code: "ABC"`
+
+**Назначение:** Префиксовать имена phase-директорий project-кодом для multi-project disambiguation.
+
+**Требования:**
+- REQ-PREFIX-01: Система ДОЛЖНА префиксовать phase-директории project-кодом когда сконфигурировано (например, `ABC-01-setup/`)
+- REQ-PREFIX-02: Система ДОЛЖНА использовать стандартное именование когда `project_code` не установлен
+- REQ-PREFIX-03: Система ДОЛЖНА применять префикс согласованно ко всем phase-операциям
+
+---
+
+### 68. Claude Code Skills Migration
+
+**Часть:** `npx get-shit-done-cc`
+
+**Назначение:** Мигрировать GSD-команды в формат skills Claude Code 2.1.88+ с backward compatibility.
+
+**Требования:**
+- REQ-SKILLS-01: Установщик ДОЛЖЕН писать `skills/gsd-*/SKILL.md` для Claude Code 2.1.88+
+- REQ-SKILLS-02: Установщик ДОЛЖЕН авто-чистить легаси директорию `commands/gsd/`
+- REQ-SKILLS-03: Установщик ДОЛЖЕН поддерживать backward compatibility с более старыми версиями Claude Code через Gemini path
+
+---
+
+## v1.32 фичи
+
+### 69. STATE.md Consistency Gates
+
+**Команды:** `state validate`, `state sync [--verify]`, `state planned-phase --phase N --plans N`
+
+**Назначение:** Детектить и чинить дрейф между STATE.md и фактической ФС, предотвращая каскадные ошибки от устаревшего state.
+
+**Требования:**
+- REQ-STATE-01: `state validate` ДОЛЖЕН детектить дрейф между полями STATE.md и реальностью ФС
+- REQ-STATE-02: `state sync` ДОЛЖЕН реконструировать STATE.md из фактического состояния проекта на диске
+- REQ-STATE-03: `state sync --verify` ДОЛЖЕН выполнять dry-run показывающий предложенные изменения без записи
+- REQ-STATE-04: `state planned-phase` ДОЛЖЕН фиксировать переход состояния после завершения plan-phase
+
+---
+
+### 70. Autonomous `--to N` Flag
+
+**Назначение:** Остановить autonomous-исполнение после завершения конкретной фазы, разрешая частичные autonomous-проходы.
+
+**Требования:**
+- REQ-TO-01: Система ДОЛЖНА останавливать исполнение после завершения указанного номера фазы
+- REQ-TO-02: Система ДОЛЖНА следовать тому же discuss → plan → execute flow для каждой фазы вплоть до N
+- REQ-TO-03: `--to N` ДОЛЖЕН быть комбинируемым с `--from N` для ограниченных autonomous-диапазонов
+
+---
+
+### 71. Research Gate
+
+**Часть:** `/gsd-plan-phase`
+
+**Назначение:** Блочить планирование когда RESEARCH.md имеет неразрешённые open-вопросы, предотвращая планы, построенные на неполной информации.
+
+**Требования:**
+- REQ-RESGATE-01: Система ДОЛЖНА сканить RESEARCH.md на неразрешённые open-вопросы до начала планирования
+- REQ-RESGATE-02: Система ДОЛЖНА блочить вход в plan-phase когда open-вопросы существуют
+- REQ-RESGATE-03: Система ДОЛЖНА всплывать конкретные неразрешённые вопросы пользователю
+
+---
+
+### 72. Verifier Milestone Scope Filtering
+
+**Часть:** `/gsd-execute-phase` (verifier-шаг)
+
+**Назначение:** Различать между genuine-пробелами и айтемами, отложенными к поздним фазам, снижая false-negatives в верификации.
+
+**Требования:**
+- REQ-VSCOPE-01: Verifier ДОЛЖЕН проверять адресуется ли пробел в более поздней milestone-фазе
+- REQ-VSCOPE-02: Пробелы, адресованные в поздних фазах, ДОЛЖНЫ маркироваться как "deferred", не "gap"
+- REQ-VSCOPE-03: Только genuine-пробелы (не покрытые любой будущей фазой) ДОЛЖНЫ репортиться как падения
+
+---
+
+### 73. Read-Before-Edit Guard Hook
+
+**Часть:** Хуки (`PreToolUse`)
+
+**Назначение:** Предотвратить бесконечные retry-циклы в не-Claude рантаймах, гарантируя что файлы прочитаны до правки.
+
+**Требования:**
+- REQ-RBE-01: Хук ДОЛЖЕН детектить Edit/Write tool-вызовы, таргетящие файлы не прочитанные ранее в сессии
+- REQ-RBE-02: Хук ДОЛЖЕН советовать сначала прочитать файл (advisory, не блокирующий)
+- REQ-RBE-03: Хук ДОЛЖЕН предотвращать бесконечные retry-циклы, типичные для рантаймов без встроенного read-before-edit форсинга
+
+---
+
+### 74. Context Reduction
+
+**Назначение:** Снизить размеры context-промптов через markdown-усечение и cache-friendly ordering.
+
+**Требования:**
+- REQ-CTXRED-01: Система ДОЛЖНА усекать oversized markdown-артефакты чтобы поместиться в context-бюджеты
+- REQ-CTXRED-02: Система ДОЛЖНА упорядочивать промпты для cache-friendly сборки (стабильные префиксы первыми)
+- REQ-CTXRED-03: Редукция ДОЛЖНА сохранять essential-информацию (заголовки, требования, task-структуру)
+- REQ-CTXRED-04: Поля `description:` скиллов ДОЛЖНЫ быть ≤ 100 символов; форсятся `npm run lint:descriptions`
+
+---
+
+### 75. Discuss-Phase `--power` Flag
+
+**Назначение:** File-based bulk-ответы для discuss-phase, включая batch-ввод из подготовленного answers-файла.
+
+**Требования:**
+- REQ-POWER-01: Система ДОЛЖНА принимать файл, содержащий pre-written ответы на discussion-вопросы
+- REQ-POWER-02: Система ДОЛЖНА маппить ответы на соответствующие gray-area вопросы
+- REQ-POWER-03: Система ДОЛЖНА производить CONTEXT.md идентичный интерактивному discuss-phase
+
+---
+
+### 76. Debug `--diagnose` Flag
+
+**Назначение:** Diagnosis-only режим, расследующий без попыток фикса.
+
+**Требования:**
+- REQ-DIAG-01: Система ДОЛЖНА выполнять полное debug-расследование (гипотезы, доказательства, root cause)
+- REQ-DIAG-02: Система НЕ ДОЛЖНА пытаться любые код-модификации
+- REQ-DIAG-03: Система ДОЛЖНА производить диагностический отчёт с находками и рекомендованными фиксами
+
+---
+
+### 77. Phase Dependency Analysis
+
+**Команда:** `/gsd-manager --analyze-deps`
+
+**Назначение:** Детектить зависимости фаз и предлагать `Depends on` записи для ROADMAP.md до запуска `/gsd-manager`.
+
+**Требования:**
+- REQ-DEP-01: Система ДОЛЖНА детектить file-overlap между фазами
+- REQ-DEP-02: Система ДОЛЖНА детектить семантические зависимости (API/schema producers и consumers)
+- REQ-DEP-03: Система ДОЛЖНА детектить data flow зависимости (output producers и readers)
+- REQ-DEP-04: Система ДОЛЖНА предлагать dependency-записи с подтверждением пользователем до записи
+
+---
+
+### 78. Anti-Pattern Severity Levels
+
+**Часть:** `/gsd-resume-work`
+
+**Назначение:** Обязательные understanding-проверки на resume с severity-based anti-pattern форсингом.
+
+**Требования:**
+- REQ-ANTI-01: Система ДОЛЖНА классифицировать анти-паттерны по severity-уровню
+- REQ-ANTI-02: Система ДОЛЖНА форсить обязательные understanding-проверки на session-resume
+- REQ-ANTI-03: Anti-паттерны более высокой severity ДОЛЖНЫ блокировать workflow-прогрессию пока не подтверждены
+
+---
+
+### 79. Methodology Artifact Type
+
+**Назначение:** Определить consumption-механизмы для methodology-документов, гарантируя что они потребляются корректно агентами.
+
+**Требования:**
+- REQ-METHOD-01: Система ДОЛЖНА поддерживать methodology как distinct artifact-тип
+- REQ-METHOD-02: Methodology-артефакты ДОЛЖНЫ иметь определённые consumption-механизмы для агентов
+
+---
+
+### 80. Planner Reachability Check
+
+**Часть:** `/gsd-plan-phase`
+
+**Назначение:** Валидировать что plan-шаги достижимы до коммита к исполнению.
+
+**Требования:**
+- REQ-REACH-01: Планировщик ДОЛЖЕН валидировать что каждый plan-шаг ссылается на достижимые файлы и API
+- REQ-REACH-02: Недостижимые шаги ДОЛЖНЫ флагаться во время планирования, не обнаруживаться во время исполнения
+
+---
+
+### 81. Playwright-MCP UI Verification
+
+**Часть:** `/gsd-verify-work` (опционально)
+
+**Назначение:** Автоматическая визуальная верификация используя Playwright-MCP во время verify-phase.
+
+**Требования:**
+- REQ-PLAY-01: Система ДОЛЖНА поддерживать опциональную Playwright-MCP визуальную верификацию во время verify-phase
+- REQ-PLAY-02: Визуальная верификация ДОЛЖНА быть opt-in, не обязательной
+- REQ-PLAY-03: Система ДОЛЖНА захватывать и сравнивать визуальное состояние против ожиданий UI-SPEC.md
+
+---
+
+### 82. Pause-Work Expansion
+
+**Часть:** `/gsd-pause-work`
+
+**Назначение:** Поддержка не-phase контекстов с более богатыми handoff-данными для более широкой применимости pause-work.
+
+**Требования:**
+- REQ-PAUSE-01: Система ДОЛЖНА поддерживать pause в не-phase контекстах (quick-задачи, debug-сессии, треды)
+- REQ-PAUSE-02: Handoff-данные ДОЛЖНЫ включать более богатый контекст подходящий типу текущей работы
+
+---
+
+### 83. Response Language Config
+
+**Конфиг:** `response_language`
+
+**Назначение:** Cross-phase языковая консистентность для non-English пользователей.
+
+**Требования:**
+- REQ-LANG-01: Система ДОЛЖНА уважать настройку `response_language` через все фазы и агенты
+- REQ-LANG-02: Настройка ДОЛЖНА распространяться на все спавнящиеся агенты для согласованного language-output
+
+---
+
+### 84. Manual Update Procedure
+
+**Часть:** `docs/manual-update.md`
+
+**Назначение:** Задокументировать manual update-путь для окружений где `npx` недоступен или npm publish испытывает outages.
+
+---
+
+### 85. New Runtime Support (Trae, Cline, Augment Code)
+
+**Часть:** `npx get-shit-done-cc`
+
+**Назначение:** Расширить установку GSD на Trae IDE, Cline и Augment Code рантаймы.
+
+---
+
+### 86. Autonomous `--interactive` Flag
+
+**Назначение:** Lean-context autonomous-режим, держащий discuss-phase интерактивным (пользователь отвечает на вопросы), пока диспатчит plan и execute как фоновых агентов.
+
+**Требования:**
+- REQ-INTERACT-01: `--interactive` ДОЛЖЕН запускать discuss-phase inline с интерактивными вопросами (не авто-отвеченными)
+- REQ-INTERACT-02: `--interactive` ДОЛЖЕН диспатчить plan-phase и execute-phase как фоновых агентов для context-изоляции
+- REQ-INTERACT-03: `--interactive` ДОЛЖЕН включать pipeline-параллелизм — обсуждение Phase N+1 пока Phase N строится
+- REQ-INTERACT-04: Главный контекст ДОЛЖЕН только аккумулировать discuss-разговоры (lean-контекст)
+
+---
+
+### 87. Commit-Docs Guard Hook
+
+**Хук:** `gsd-commit-docs.js`
+
+**Назначение:** PreToolUse хук, форсящий конфигурацию `commit_docs`, предотвращая коммит файлов `.planning/` когда `planning.commit_docs` равен `false`.
+
+---
+
+### 88. Community Hooks Opt-In
+
+**Хуки:** `gsd-validate-commit.sh`, `gsd-session-state.sh`, `gsd-phase-boundary.sh`
+
+**Назначение:** Опциональные git- и session-хуки для GSD-проектов, гейтнутые за `hooks.community: true` в конфиге.
+
+---
+
+## v1.34.0 фичи
+
+### 89. Global Learnings Store
+
+**Конфиг:** `features.global_learnings`
+
+**Назначение:** Persist'ить cross-session, cross-project уроки в глобальном хранилище, чтобы агент-планировщик мог учиться на паттернах всей project-истории — не только текущей сессии.
+
+**Требования:**
+- REQ-LEARN-01: Уроки ДОЛЖНЫ авто-копироваться из `.planning/` в global store на завершении фазы
+- REQ-LEARN-02: Агент-планировщик ДОЛЖЕН получать релевантные уроки на spawn-time через инъекцию
+- REQ-LEARN-03: Инъекция ДОЛЖНА быть капнута `learnings.max_inject` чтобы избежать context-bloat
+- REQ-LEARN-04: Фича ДОЛЖНА быть opt-in через `features.global_learnings: true`
+
+---
+
+### 90. Queryable Codebase Intelligence
+
+**Команда:** `/gsd-map-codebase --query [<term>|status|diff|refresh]`
+**Конфиг:** `intel.enabled`
+
+**Назначение:** Поддерживать queryable JSON-индекс структуры кодовой базы, API surface, dependency graph, file roles и архитектурных решений в `.planning/intel/`. Включает таргетные lookup'ы без чтения всей кодовой базы.
+
+**Требования:**
+- REQ-INTEL-01: Intel-файлы ДОЛЖНЫ храниться как JSON в `.planning/intel/`
+- REQ-INTEL-02: `query` режим ДОЛЖЕН искать через все intel-файлы по термину и группировать результаты по файлу
+- REQ-INTEL-03: `status` режим ДОЛЖЕН репортить свежесть (FRESH/STALE, stale-порог: 24 часа)
+- REQ-INTEL-04: `diff` режим ДОЛЖЕН сравнивать текущее intel-состояние с последним snapshot'ом
+- REQ-INTEL-05: `refresh` режим ДОЛЖЕН спавнить intel-updater агента для перестройки всех файлов
+- REQ-INTEL-06: Фича ДОЛЖНА быть opt-in через `intel.enabled: true`
+
+**Произведённые Intel-файлы:**
+| Файл | Содержание |
+|------|------------|
+| `stack.json` | Технический стек и зависимости |
+| `api-map.json` | Экспортированные функции и API surface |
+| `dependency-graph.json` | Inter-module dependency отношения |
+| `file-roles.json` | Role-классификация каждого source-файла |
+| `arch-decisions.json` | Детектированные архитектурные решения |
+
+---
+
+### 91. Execution Context Profiles
+
+**Конфиг:** `context_profile`
+
+**Назначение:** Выбирать pre-configured execution-контекст (mode, model, workflow-настройки), затюненный под конкретный тип работы, без ручной настройки индивидуальных опций.
+
+**Доступные профили:** `dev`, `research`, `review`
+
+---
+
+### 92. Gates Taxonomy
+
+**Назначение:** Определить 4 канонических типа gate'ов, структурирующие все decision-points workflow, позволяя plan-checker и verifier агентам применять консистентную gate-логику.
+
+**Типы gate'ов:**
+| Тип | Описание |
+|-----|----------|
+| **Confirm** | Пользователь одобряет до продолжения (например, roadmap-ревью) |
+| **Quality** | Автоматическая quality-проверка должна пройти (например, plan verification loop) |
+| **Safety** | Hard stop на детектированном риске или нарушении политики |
+| **Transition** | Подтверждение границы фазы или майлстоуна |
+
+---
+
+### 93. Code Review Pipeline
+
+**Команды:** `/gsd-code-review`, `/gsd-code-review --fix`
+
+**Назначение:** Структурный ревью source-файлов, изменённых во время фазы, с отдельным auto-fix проходом, коммитящим каждый фикс атомарно.
+
+**Требования:**
+- REQ-REVIEW-01: `gsd-code-review` ДОЛЖЕН скоупить файлы под фазу используя SUMMARY.md и git diff fallback
+- REQ-REVIEW-02: Ревью ДОЛЖЕН поддерживать три глубины: `quick`, `standard`, `deep`
+- REQ-REVIEW-03: Находки ДОЛЖНЫ быть severity-классифицированы: Critical, Warning, Info
+- REQ-REVIEW-04: `gsd-code-review --fix` ДОЛЖЕН читать REVIEW.md и фиксить Critical + Warning по дефолту
+- REQ-REVIEW-05: Каждый фикс ДОЛЖЕН коммититься атомарно с описательным сообщением
+- REQ-REVIEW-06: Флаг `--auto` ДОЛЖЕН включать цикл fix + re-review, кап 3 итерации
+- REQ-REVIEW-07: Фича ДОЛЖНА быть гейтнута `workflow.code_review` config-флагом
+
+---
+
+### 94. Socratic Exploration
+
+**Команда:** `/gsd-explore [topic]`
+
+**Назначение:** Провести разработчика через изучение идеи через Socratic probing-вопросы до коммита к плану. Роутит outputs в подходящий GSD-артефакт: заметки, todos, seeds, research-вопросы, обновления требований или новую фазу.
+
+---
+
+### 95. Safe Undo
+
+**Команда:** `/gsd-undo --last N | --phase NN | --plan NN-MM`
+
+**Назначение:** Безопасно откатить GSD phase- или plan-коммиты используя phase-манифест и git-лог, с проверкой зависимостей и hard confirmation gate до применения любого revert'а.
+
+---
+
+### 96. Plan Import
+
+**Команда:** `/gsd-import --from <filepath>`
+
+**Назначение:** Импортировать внешний plan-файл в planning-систему GSD с детекцией конфликтов против решений `PROJECT.md`, конвертируя в валидный GSD PLAN.md и валидируя через plan-checker.
+
+---
+
+### 97. Rapid Codebase Scan
+
+**Команда:** `/gsd-map-codebase --fast [--focus tech|arch|quality|concerns]`
+
+**Назначение:** Лёгкая альтернатива `/gsd-map-codebase`, спавнящая одного mapper-агента для одной или двух комбинированных focus-областей.
+
+---
+
+### 98. Autonomous Audit-to-Fix
+
+**Команда:** `/gsd-audit-fix [--source <audit>] [--severity high|medium|all] [--max N] [--dry-run]`
+
+**Назначение:** End-to-end pipeline, запускающий audit, классифицирующий находки как auto-fixable vs manual-only, потом автономно чинящий auto-fixable проблемы с test-верификацией и атомарными коммитами.
+
+---
+
+### 99. Improved Prompt Injection Scanner
+
+**Назначение:** Улучшенная детекция попыток prompt injection в планировочных артефактах, добавляя детекцию invisible Unicode символов, encoding obfuscation паттернов и entropy-based анализ.
+
+---
+
+### 100. Stall Detection in Plan-Phase
+
+**Назначение:** Детектить когда planner revision-цикл застрял — производит тот же output через несколько итераций — и ломать цикл эскалацией к другой стратегии или выходом с понятной диагностикой.
+
+---
+
+### 101. Hard Stop Safety Gates в /gsd-progress --next
+
+**Назначение:** Предотвратить runaway-циклы `/gsd-progress --next` добавлением hard stop safety gate'ов и consecutive-call guard'а, прерывающего autonomous-цепочку когда детектированы повторяющиеся идентичные шаги.
+
+---
+
+### 102. Adaptive Model Preset
+
+**Конфиг:** `model_profile: "adaptive"`
+
+**Назначение:** Role-based назначение моделей, автоматически выбирающее подходящий model-tier на основе роли текущего агента, а не применяющее один tier ко всем агентам.
+
+---
+
+### 103. Post-Merge Hunk Verification
+
+**Команда:** `/gsd-update --reapply`
+
+**Назначение:** После применения локальных патчей post-update, верифицировать что все hunk'и были фактически применены, сравнивая ожидаемое patch-содержимое против live-ФС. Всплывать любые дропнутые или частичные hunk'и сразу.
+
+---
+
+## v1.35.0 фичи
+
+### 104. New Runtime Support (Cline, CodeBuddy, Qwen Code)
+
+**Назначение:** Расширить установку GSD на Cline, CodeBuddy и Qwen Code рантаймы.
+
+| Рантайм | Формат установки | Конфиг-путь | Флаг |
+|---------|------------------|-------------|------|
+| Cline | `.clinerules` | `~/.cline/` или `./.cline/` | `--cline` |
+| CodeBuddy | Skills (`SKILL.md`) | `~/.codebuddy/skills/` | `--codebuddy` |
+| Qwen Code | Skills (`SKILL.md`) | `~/.qwen/skills/` | `--qwen` |
+
+---
+
+### 105. GSD-2 Reverse Migration
+
+**Команда:** `/gsd-import --from-gsd2 [--dry-run] [--force] [--path <dir>]`
+
+**Назначение:** Мигрировать проект из формата GSD-2 (`.gsd/` директория с иерархией Milestone→Slice→Task) обратно в v1 `.planning/` формат, восстанавливая полную совместимость со всеми GSD v1 командами.
+
+**Флаги:**
+| Флаг | Описание |
+|------|----------|
+| `--dry-run` | Превью миграции без записи файлов |
+| `--force` | Перезаписать существующую `.planning/` директорию |
+| `--path <dir>` | Указать GSD-2 root-директорию |
+
+---
+
+### 106. AI Integration Phase Wizard
+
+**Команда:** `/gsd-ai-integration-phase [N]`
+
+**Назначение:** Провести разработчиков через выбор, интеграцию и планирование оценки AI/LLM возможностей в фазе проекта. Производит структурированный `AI-SPEC.md`, питающий планирование и верификацию.
+
+**Требования:**
+- REQ-AISPEC-01: Wizard ДОЛЖЕН презентовать интерактивную decision-matrix, покрывающую выбор фреймворка, модели и подход к интеграции
+- REQ-AISPEC-02: Система ДОЛЖНА всплывать domain-specific failure modes и eval-критерии, релевантные типу проекта
+- REQ-AISPEC-03: Система ДОЛЖНА спавнить 3 параллельных специалист-агента: domain-researcher, framework-selector и eval-planner
+- REQ-AISPEC-04: Output ДОЛЖЕН производить `{phase}-AI-SPEC.md` с рекомендацией фреймворка, гайдом по реализации и стратегией оценки
+
+---
+
+### 107. AI Eval Review
+
+**Команда:** `/gsd-eval-review [N]`
+
+**Назначение:** Ретроактивно проаудить покрытие оценки исполненной AI-фазы против плана `AI-SPEC.md`. Идентифицирует пробелы между запланированной и имплементированной оценкой до закрытия фазы.
+
+**Требования:**
+- REQ-EVALREVIEW-01: Ревью ДОЛЖЕН читать `AI-SPEC.md` из указанной фазы
+- REQ-EVALREVIEW-02: Каждое eval-измерение ДОЛЖНО оцениваться как COVERED, PARTIAL или MISSING
+- REQ-EVALREVIEW-03: Output ДОЛЖЕН включать находки, описания пробелов и remediation-гайд
+- REQ-EVALREVIEW-04: `EVAL-REVIEW.md` ДОЛЖЕН быть записан в директорию фазы
+
+---
+
+## v1.36.0 фичи
+
+### 108. Plan Bounce
+
+**Команда:** `/gsd-plan-phase N --bounce`
+
+**Назначение:** После прохождения планов через checker, опционально дорабатывать их через внешний скрипт (второй AI, линтер, custom-валидатор). Bounce-шаг бэкапит каждый план, запускает скрипт, валидирует YAML frontmatter integrity на результате, перезапускает plan checker и восстанавливает оригинал если что-то падает.
+
+**Требования:**
+- REQ-BOUNCE-01: Флаг `--bounce` или `workflow.plan_bounce: true` активирует шаг; `--skip-bounce` всегда отключает
+- REQ-BOUNCE-02: `workflow.plan_bounce_script` должен указывать на валидный исполняемый файл; отсутствующий скрипт даёт warning и пропускает
+- REQ-BOUNCE-03: Каждый план бэкапится в `*-PLAN.pre-bounce.md` до запуска скрипта
+- REQ-BOUNCE-04: Bounced-планы со сломанным YAML frontmatter или провалом plan checker восстанавливаются из бэкапа
+- REQ-BOUNCE-05: `workflow.plan_bounce_passes` (дефолт: 2) контролирует сколько проходов доработки получает скрипт
+
+---
+
+### 109. External Code Review Command
+
+**Команда:** `/gsd-ship` (улучшено)
+
+**Назначение:** До ручного review-шага в `/gsd-ship`, автоматически запускать внешнюю code-review команду если сконфигурирована. Команда получает diff и phase-контекст через stdin и возвращает JSON-вердикт (`APPROVED` или `REVISE`).
+
+**Требования:**
+- REQ-EXTREVIEW-01: `workflow.code_review_command` должна быть установлена в command-строку; null означает пропуск
+- REQ-EXTREVIEW-02: Diff генерируется против `BASE_BRANCH` с включённым `--stat` summary
+- REQ-EXTREVIEW-03: Review-промпт пайпится через stdin (никогда shell-interpolated)
+- REQ-EXTREVIEW-04: 120-секундный таймаут; stderr захватывается при падении
+- REQ-EXTREVIEW-05: JSON-output парсится на поля `verdict`, `confidence`, `summary`, `issues`
+
+---
+
+### 110. Cross-AI Execution Delegation
+
+**Команда:** `/gsd-execute-phase N --cross-ai`
+
+**Назначение:** Делегировать индивидуальные планы внешнему AI-рантайму для исполнения. Планы с `cross_ai: true` в frontmatter (или все планы когда используется `--cross-ai`) отсылаются в сконфигурированную команду через stdin.
+
+**Требования:**
+- REQ-CROSSAI-01: `--cross-ai` форсит все планы через cross-AI; `--no-cross-ai` отключает
+- REQ-CROSSAI-02: `workflow.cross_ai_execution: true` и plan-frontmatter `cross_ai: true` требуется для per-plan активации
+- REQ-CROSSAI-03: Task-промпт пайпится через stdin для предотвращения injection
+- REQ-CROSSAI-04: Грязное рабочее дерево даёт warning до исполнения
+- REQ-CROSSAI-05: При падении пользователь выбирает: retry, skip (fallback на нормальный executor), abort
+
+---
+
+### 111. Architectural Responsibility Mapping
+
+**Команда:** `/gsd-plan-phase` (улучшенный research-шаг)
+
+**Назначение:** Во время phase-research'а, phase-researcher теперь маппит каждую capability на её archicektural tier owner (browser, frontend server, API, CDN/static, database). Планировщик cross-reference'ит задачи против этого map'а, и plan-checker форсит tier-комплаенс как Dimension 7c.
+
+**Требования:**
+- REQ-ARM-01: Phase researcher производит таблицу Architectural Responsibility Map в RESEARCH.md (Step 1.5)
+- REQ-ARM-02: Planner sanity-check'ит task-to-tier назначения против map'а
+- REQ-ARM-03: Plan checker валидирует tier-комплаенс как Dimension 7c (WARNING для общих несовпадений, BLOCKER для security-sensitive)
+
+---
+
+### 112. Extract Learnings
+
+**Команда:** `/gsd-extract-learnings N`
+
+**Назначение:** Извлечь структурированные знания из артефактов завершённой фазы. Читает PLAN.md и SUMMARY.md (обязательно) плюс VERIFICATION.md, UAT.md и STATE.md (опционально) чтобы произвести четыре категории уроков: decisions, lessons, patterns, surprises. Опционально захватывает каждый айтем во внешнюю knowledge base через инструмент `capture_thought`.
+
+**Требования:**
+- REQ-LEARN-01: Требует PLAN.md и SUMMARY.md; выходит с понятной ошибкой если отсутствуют
+- REQ-LEARN-02: Каждый извлечённый айтем включает source-атрибуцию (артефакт и секция)
+- REQ-LEARN-03: Если инструмент `capture_thought` доступен, захватывает айтемы с метаданными `source`, `project` и `phase`
+- REQ-LEARN-04: Если `capture_thought` недоступен, завершается успешно и логирует что внешний захват был пропущен
+- REQ-LEARN-05: Повторный запуск перезаписывает предыдущий `LEARNINGS.md`
+
+**Производит:** `{phase}-LEARNINGS.md` с YAML frontmatter (phase, project, counts per category, missing_artifacts)
+
+**Опциональная интеграция — `capture_thought`:** `capture_thought` — это **конвенция, не bundled-инструмент**. GSD его не поставляет и не требует. Workflow проверяет, выставляет ли любой MCP-сервер в текущей сессии инструмент с именем `capture_thought`, и если да — вызывает его один раз на извлечённый урок. Если такого инструмента нет — шаг пропускается молча, и `LEARNINGS.md` остаётся главным output'ом.
+
+---
+
+### 113. SDK Workstream Support
+
+**Команда:** `gsd-sdk init @prd.md --ws my-workstream`
+
+**Назначение:** Роутить все SDK `.planning/` пути в `.planning/workstreams/<name>/`, включая multi-workstream проекты без ошибок "Project already exists". Флаг `--ws` валидирует имя workstream'а и распространяется на все subsystems (tools, config, context engine).
+
+**Требования:**
+- REQ-WS-01: `--ws <name>` роутит все `.planning/` пути в `.planning/workstreams/<name>/`
+- REQ-WS-02: Без `--ws` поведение не меняется (flat-режим)
+- REQ-WS-03: Имя валидируется на alphanumeric, дефисы, подчёркивания и точки
+- REQ-WS-04: Конфиг резолвится сначала из workstream-пути, fallback'ится на root `.planning/config.json`
+
+---
+
+### 114. Context-Window-Aware Prompt Thinning
+
+**Назначение:** Снизить static prompt overhead на ~40% для моделей с контекстом меньше 200K токенов. Extended-примеры и anti-pattern листы извлекаются из определений агентов в reference-файлы, грузящиеся по требованию через `@`-required_reading.
+
+**Требования:**
+- REQ-THIN-01: Когда `CONTEXT_WINDOW < 200000`, executor и planner agent промпты опускают inline-примеры
+- REQ-THIN-02: Извлечённый контент живёт в `references/executor-examples.md` и `references/planner-antipatterns.md`
+- REQ-THIN-03: Standard (200K-500K) и enriched (500K+) tier'ы не затронуты
+- REQ-THIN-04: Core-правила и decision-логика остаются inline; только verbose-примеры извлечены
+
+---
+
+### 115. Configurable CLAUDE.md Path
+
+**Назначение:** Позволить проектам хранить CLAUDE.md в не-корневой локации. Config-ключ `claude_md_path` контролирует где `/gsd-profile-user` и связанные команды пишут сгенерированный CLAUDE.md файл.
+
+**Требования:**
+- REQ-CMDPATH-01: `claude_md_path` по дефолту `./CLAUDE.md`
+- REQ-CMDPATH-02: Profile-генерационные команды читают путь из конфига и пишут в указанную локацию
+- REQ-CMDPATH-03: Относительные пути резолвятся от корня проекта
+
+---
+
+### 116. TDD Pipeline Mode
+
+**Назначение:** Opt-in TDD (red-green-refactor) как first-class phase execution mode. Когда включено, планировщик агрессивно выбирает `type: tdd` для подходящих задач, и executor форсит последовательность gate'ов RED/GREEN/REFACTOR с fail-fast на неожиданном GREEN до RED.
+
+**Требования:**
+- REQ-TDD-01: Config-ключ `workflow.tdd_mode` (boolean, дефолт `false`)
+- REQ-TDD-02: Когда включено, планировщик применяет TDD-эвристики из `references/tdd.md` ко всем подходящим задачам (бизнес-логика, API, валидации, алгоритмы, state machines)
+- REQ-TDD-03: Executor форсит последовательность gate'ов для `type: tdd` планов — RED-коммит (`test(...)`) должен предшествовать GREEN-коммиту (`feat(...)`)
+- REQ-TDD-04: Executor fail'ит быстро если тесты неожиданно проходят во время RED-фазы (фича уже существует или тест неправильный)
+- REQ-TDD-05: End-of-phase collaborative review checkpoint верифицирует соблюдение gate'ов через все TDD-планы (advisory, не блокирующий)
+- REQ-TDD-06: Нарушения gate'ов всплывают в SUMMARY.md под секцией `## TDD Gate Compliance`
+
+---
+
+## v1.37.0 фичи
+
+### 117. Spike Command
+
+**Команда:** `/gsd-spike [idea] [--quick]`
+
+**Назначение:** Запустить 2–5 фокусных экспериментов осуществимости до коммита к подходу. Каждый эксперимент использует Given/When/Then-frame, производит исполнимый код и возвращает вердикт VALIDATED / INVALIDATED / PARTIAL. Companion `/gsd-spike --wrap-up` упаковывает находки в project-local скилл.
+
+**Производит:**
+| Артефакт | Описание |
+|----------|----------|
+| `.planning/spikes/NNN-name/README.md` | Гипотеза, experiment-код, вердикт, доказательства |
+| `.planning/spikes/MANIFEST.md` | Индекс всех spike'ов с вердиктами |
+| `.claude/skills/spike-findings-[project]/` | Упакованные находки (через `/gsd-spike --wrap-up`) |
+
+---
+
+### 118. Sketch Command
+
+**Команда:** `/gsd-sketch [idea] [--quick] [--text]`
+
+**Назначение:** Исследовать дизайн-направления через одноразовые HTML-моки до коммита к реализации. Производит 2–3 интерактивных варианта на дизайн-вопрос, все просматриваемые прямо в браузере без шага сборки. Companion `/gsd-sketch --wrap-up` упаковывает решения победителя в project-local скилл.
+
+**Производит:**
+| Артефакт | Описание |
+|----------|----------|
+| `.planning/sketches/NNN-name/index.html` | 2–3 интерактивных HTML-варианта |
+| `.planning/sketches/NNN-name/README.md` | Дизайн-вопрос, варианты, победитель, что искать |
+| `.planning/sketches/themes/default.css` | Общие CSS-переменные темы |
+| `.planning/sketches/MANIFEST.md` | Индекс всех sketch'ей с победителями |
+| `.claude/skills/sketch-findings-[project]/` | Упакованные решения (через `/gsd-sketch --wrap-up`) |
+
+---
+
+### 119. Agent Size-Budget Enforcement
+
+**Назначение:** Держать agent prompt-файлы lean с tier'ованными line-count лимитами, форсимыми в CI. Oversized-агенты ловятся до того как раздувают context-окна в продакшене.
+
+**Требования:**
+- REQ-BUDGET-01: Файлы `agents/gsd-*.md` классифицированы в три tier'а: XL (≤ 1600 строк), Large (≤ 1000), Default (≤ 500)
+- REQ-BUDGET-02: Tier-назначение объявляется во YAML frontmatter файла (`size: xl | large | default`)
+- REQ-BUDGET-03: `tests/agent-size-budget.test.cjs` форсит лимиты и фейлит CI на нарушении
+- REQ-BUDGET-04: Файлы без `size`-ключа во frontmatter по дефолту имеют Default-лимит (500 строк)
+
+---
+
+### 120. Shared Boilerplate Extraction
+
+**Назначение:** Снизить дублирование между агентами извлечением двух общих boilerplate-блоков в общие reference-файлы, грузящиеся по требованию. Держит agent-файлы в size-бюджете и делает обновления boilerplate'а single-file изменением.
+
+---
+
+### 121. Knowledge Graph Integration
+
+**Назначение:** Строить, query'ить и инспектить лёгкий knowledge graph проекта в `.planning/graphs/`. Opt-in per project. Выставлен как user-facing команда `/gsd-graphify` и программный verb family `gsd-tools.cjs graphify …`.
+
+**Требования:**
+- REQ-GRAPH-01: Opt-in через `graphify.enabled: true` в `.planning/config.json`. Когда отключено, `/gsd-graphify` печатает activation-hint и останавливается без записи.
+- REQ-GRAPH-02: Slash-команда `/gsd-graphify` выставляет подкоманды `build`, `query <term>`, `status`, `diff`. Программный CLI `node gsd-tools.cjs graphify …` дополнительно выставляет `snapshot`, который также вызывается автоматически как финальный шаг `graphify build`.
+- REQ-GRAPH-03: Build работает в пределах конфигурируемого `graphify.build_timeout` (секунды); превышение прерывает чисто без оставления частичного графа.
+- REQ-GRAPH-04: `graphify.cjs` fallback'ится на `graph.links` когда `graph.edges` отсутствует, так что старые graph-артефакты продолжают рендериться.
+- REQ-GRAPH-05: CJS-only surface; `gsd-sdk query` пока не регистрирует graphify-хендлеры.
+
+---
+
+## v1.40.0 фичи
+
+### 122. Skill Surface Consolidation
+
+**Назначение:** Снизить eager skill-listing overhead, сложив 31 micro-скилл в 4 новых grouped-родителя и 6 существующих родителей, абсорбирующих sub-операции как флаги. Нулевая функциональная потеря — поведение каждого удалённого micro-скилла переживает как флаг на консолидированном родителе. После консолидации `commands/gsd/*.md` поставляет 59 sub-скиллов (плюс 6 namespace meta-скиллов, см. #123).
+
+**Требования:**
+- REQ-CONSOLIDATE-01: Четыре новых grouped-скилла заменяют кластеры micro-скиллов:
+  - `/gsd-capture` — складывает add-todo (default), note (`--note`), add-backlog (`--backlog`), plant-seed (`--seed`), check-todos (`--list`)
+  - `/gsd-phase` — складывает add-phase (default), insert-phase (`--insert`), remove-phase (`--remove`), edit-phase (`--edit`)
+  - `/gsd-config` — складывает settings-advanced (`--advanced`), settings-integrations (`--integrations`), set-profile (`--profile`)
+  - `/gsd-workspace` — складывает new-workspace (`--new`), list-workspaces (`--list`), remove-workspace (`--remove`)
+- REQ-CONSOLIDATE-02: Шесть существующих родителей абсорбируют wrap-up / sub-операции как флаги
+- REQ-CONSOLIDATE-03: Удалённые micro-skill slash-формы ДОЛЖНЫ резолвиться в "Unknown command" — никаких shadow-stub'ов
+- REQ-CONSOLIDATE-04: `autonomous.md` вызывает `/gsd-code-review --fix` (раньше вызывал удалённый `gsd-code-review-fix`)
+
+---
+
+### 123. Namespace Meta-Skills (двухступенчатый роутинг)
+
+**Назначение:** Заменить плоский eager skill-листинг двухступенчатым иерархическим routing-слоем. Модель видит 6 namespace-роутеров вместо 86 записей, выбирает namespace, потом роутит на sub-скилл. Описания используют pipe-разделённые keyword-теги (≤ 60 символов) для routing-плотности.
+
+**Команды:**
+- `/gsd-workflow` — phase pipeline router (discuss / plan / execute / verify / phase / progress)
+- `/gsd-project` — project lifecycle (milestones, audits, summary)
+- `/gsd-quality` — quality gates (code review, debug, audit, security, eval, ui)
+- `/gsd-context` — codebase intelligence (map, graphify, docs, learnings)
+- `/gsd-manage` — config / workspace / workstreams / thread / update / ship / inbox
+- `/gsd-ideate` — exploration & capture (explore, sketch, spike, spec, capture)
+
+**Токен-стоимость:**
+
+|  | Записей | Примерно токенов |
+|---|---|---|
+| Pre-1.40 full install | 86 | ~2 150 |
+| Namespace meta-скиллы | 6 | ~120 |
+
+---
+
+### 124. Context-Window Utilization Guard
+
+**Команда:** `/gsd-health --context`
+
+**Назначение:** Quality guard против context-window saturation. Два порога: 60% утилизации даёт warning ("рассмотри `/gsd-thread`"), 70% — critical ("качество рассуждения может деградировать"; совпадает с fracture-point по недавним исследованиям context attention).
+
+**Требования:**
+- REQ-CTX-GUARD-01: `/gsd-health --context` печатает структурированную status-строку с текущей утилизацией, threshold-tier'ом (`ok` / `warn` / `critical`) и remediation-предложением
+- REQ-CTX-GUARD-02: Тот же triage выставлен как `gsd-sdk query validate.context --tokens-used <int> --context-window <int>`
+- REQ-CTX-GUARD-03: Классификатор (`bin/lib/context-utilization.cjs`) — чистый: input `(tokensUsed, contextWindow)`, output `{ percent, state }`
+
+---
+
+### 125. Phase-Lifecycle Status-Line Read-Side
+
+**Назначение:** Всплывать phase orchestration-state на status-line. `parseStateMd()` читает четыре новых поля STATE.md frontmatter, и `formatGsdState()` рендерит in-flight, idle и progress-сцены. Write-side wiring следует в более поздней RC.
+
+**Требования:**
+- REQ-LIFECYCLE-01: `parseStateMd()` читает четыре опциональных поля:
+  - `active_phase` — номер фазы когда оркестратор в полёте
+  - `next_action` — рекомендованная следующая команда в idle
+  - `next_phases` — YAML flow array следующих номеров фаз
+  - `progress` — вложенный `total_phases` / `completed_phases` / `percent` блок
+- REQ-LIFECYCLE-02: `formatGsdState()` проверяет lifecycle-поля в priority-порядке и эмитит первую совпавшую сцену
+- REQ-LIFECYCLE-03: Все четыре поля по дефолту undefined; существующие STATE.md файлы рендерятся byte-for-byte идентично
+
+---
+
+## v1.41.0 фичи
+
+### 126. Per-Phase-Type Model Selection
+
+**Назначение:** Express model-тюнинг на phase-уровне (planning, research, execution, verification) без изучения полной agent-таксономии. Сидит между per-agent `model_overrides` (точно, verbose) и глобальным `model_profile` tier'ом (coarse, uniform).
+
+**Config-ключ:** `models` в `.planning/config.json`
+
+**Phase-type слоты:**
+
+| Слот | Назначенные агенты |
+|------|---------------------|
+| `planning` | `gsd-planner`, `gsd-roadmapper`, `gsd-pattern-mapper` |
+| `discuss` | (зарезервировано для будущего sub-агента) |
+| `research` | `gsd-phase-researcher`, `gsd-project-researcher`, `gsd-research-synthesizer`, `gsd-codebase-mapper`, `gsd-ui-researcher` |
+| `execution` | `gsd-executor`, `gsd-debugger`, `gsd-doc-writer` |
+| `verification` | `gsd-verifier`, `gsd-plan-checker`, `gsd-integration-checker`, `gsd-nyquist-auditor`, `gsd-ui-checker`, `gsd-ui-auditor`, `gsd-doc-verifier` |
+| `completion` | (зарезервировано для будущего sub-агента) |
+
+**Принимаемые значения:** `"opus"` / `"sonnet"` / `"haiku"` / `"inherit"`
+
+**Приоритет резолва (высокий → низкий):**
+
+```text
+1. model_overrides[<agent>]
+2. dynamic_routing.tier_models[<tier>]   (когда включено)
+3. models[<phase_type>]                  (эта фича)
+4. model_profile
+5. Runtime default
+```
+
+---
+
+### 127. Dynamic Routing с Failure-Tier эскалацией
+
+**Назначение:** Платить за дешёвый tier по дефолту; эскалироваться к более capable модели автоматически когда оркестратор детектит soft failure (верификация неоднозначна, plan-check FLAG и т.д.).
+
+**Config-ключ:** `dynamic_routing` в `.planning/config.json`
+
+**Поведение:**
+- `enabled: false` (дефолт) — фича выключена; все агенты используют precedence-цепочку без изменений
+- `enabled: true` — резолвер выбирает `tier_models[default_tier]` для первого спавна и эскалируется на один tier при soft failure детектированном оркестратором, капится `max_escalations`
+
+**Композиция:** `model_overrides` всегда выигрывает; `dynamic_routing.tier_models[<tier>]` резолвится выше `models.<phase_type>` и `model_profile`.
+
+---
+
+### 128. Update Banner Opt-In
+
+**Назначение:** Всплывать доступность обновления пользователям, отказавшимся или обошедшим GSD statusline, без требования statusline'а.
+
+**Поведение:**
+- На install-time, если установщик не детектит GSD statusline, он предлагает opt-in `SessionStart` хук
+- Хук читает существующий кеш `~/.cache/gsd/gsd-update-check.json` — тот же что использует statusline — и печатает banner только когда обновление доступно
+- Молчит когда up-to-date
+- Failure-диагностика rate-limited до раза в 24 часа
+- Чисто удаляется через `npx get-shit-done-cc --uninstall`
+
+---
+
+### 129. Issue-Driven Orchestration Guide
+
+**Назначение:** Задокументировать рецепт управления полным GSD-воркфлоу из GitHub / Linear / Jira issue, маппя tracker-centric концепции на существующие GSD-примитивы.
+
+**Документ:** [`docs/issue-driven-orchestration.md`](issue-driven-orchestration.md)
+
+**Покрываемый workflow:**
+1. Создать изолированный workspace на issue (`/gsd-workspace --new`)
+2. Запустить manager-дашборд для ориентации (`/gsd-manager`)
+3. Исполнить автономно (`/gsd-autonomous`)
+4. Верифицировать и ревьюить (`/gsd-verify-work`, `/gsd-review`)
+5. Зашиппить и закрыть issue (`/gsd-ship`)
+
+Никаких новых команд или daemon-процесса — чисто документальный артефакт, маппящий существующие примитивы на tracker-driven workflow.
+
+---
+
+### 130. Graphify Commit-Based Staleness
+
+**Назначение:** Всплывать был ли архитектурный граф построен от текущего коммита или более старого, дополняя существующий mtime-based stale-сигнал.
+
+**Команда:** `/gsd-graphify status`
+
+**Новые возвращаемые поля (graphify v0.7+):**
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `built_at_commit` | string | Commit SHA с которого граф построен |
+| `current_commit` | string | Текущий `git HEAD` |
+| `commits_behind` | number | На сколько коммитов граф отстаёт от HEAD |
+| `commit_stale` | boolean \| null | `true`=stale, `false`=current, `null`=unavailable (pre-v0.7, non-git) |
+
+**Безопасность:** `built_at_commit` валидируется как 4–40 hex-символов до достижения `git` — враждебный `graph.json` не может инжектить dashed-опции в argv.
+
+**Fallback:** pre-v0.7 графы и non-git checkouts возвращают `commit_stale: null`; вызывающие стороны fallback'ятся на существующий mtime-based `stale` флаг.
+
+---
+
+### 131. MVP Mode SDK Resolution Layer
+
+**Назначение:** Заменить per-workflow MVP-mode predicate-дублирование тремя каноническими SDK query-verb'ами. Все потребляющие workflow'ы теперь вызывают single source of truth вместо инлайна 4–8 bash-строк каждый.
+
+**Новые query-verb'ы:**
+
+| Verb | Возвращает | Используется |
+|------|------------|--------------|
+| `gsd-sdk query phase.mvp-mode <N>` | `{active, source, roadmap_mode, config_mvp_mode, cli_flag_present}` | `plan-phase`, `execute-phase`, `verify-work`, `progress` |
+| `gsd-sdk query task.is-behavior-adding <plan-file>` | `{is_behavior_adding, checks: {tdd_true, has_behavior_block, has_source_files}, reason}` | агент `gsd-executor` |
+| `gsd-sdk query user-story.validate "<text>"` | `{valid, slots: {role, capability, outcome}, errors[]}` | `gsd-verifier`, `/gsd-mvp-phase` |
+
+**Приоритет резолва для `phase.mvp-mode`:**
+CLI флаг → `**Mode:** mvp` из ROADMAP → конфиг `workflow.mvp_mode` → `false`
+
+**Багфикс:** `roadmap.get-phase --pick mode` в `roadmap.ts` SDK ранее возвращал `null` для фаз с `**Mode:** mvp`, заставляя MVP_MODE молча проваливаться к false на native dispatch-пути. Восстанавливает паритет с CJS-реализацией.
+
+---
+
+> **Перевод завершён.** Все 131 фича переведены. Английский оригинал: [FEATURES.md](FEATURES.md).
